@@ -1,0 +1,206 @@
+name: Build & Release (Aiden Fork)
+
+# Every push to main/master builds BOTH deliverables and publishes them as one
+# GitHub Release:
+#   • ariane.exe                         — Ariane (Aiden Fork) for Windows x64 (D3D9)
+#   • INU_Tools-AidenFork-<ver>.zip      — Blender 4.2+ extension (Install from Disk)
+#   • INU_Tools-AidenFork-<ver>-legacy.zip — classic add-on zip for Blender 2.83–4.1
+# Pull requests only build (no release). Run it by hand from the Actions tab too.
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # librw "ariane" integration branch, pinned to the commit upstream Ariane builds with
+  LIBRW_REF: 15ffa585216a9a7573ecc597b19ce2fde9b935f2
+  BLENDER_VERSION: 4.2.20
+
+jobs:
+  ariane-windows:
+    name: Ariane (Windows x64, D3D9)
+    runs-on: windows-2022
+    env:
+      LIBRW: ${{ github.workspace }}\librw
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: src
+
+      - name: Checkout librw
+        uses: actions/checkout@v4
+        with:
+          repository: Southland-FR/librw
+          ref: ${{ env.LIBRW_REF }}
+          path: librw
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install Premake5
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-windows.zip" -OutFile premake5.zip
+          Expand-Archive premake5.zip -DestinationPath premake5
+          echo "${{ github.workspace }}\premake5" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Read Ariane version
+        id: version
+        shell: pwsh
+        run: |
+          $content = Get-Content "src/ariane/tools/euryopa/version.h" -Raw
+          if ($content -match '#define\s+ARIANE_VERSION\s+"([^"]+)"') { $ver = $Matches[1] } else { $ver = "0.0.0" }
+          echo "version=$ver" >> $env:GITHUB_OUTPUT
+
+      - name: Build librw
+        shell: cmd
+        run: |
+          cd librw
+          premake5 vs2022 || exit /b 1
+          cd build
+          msbuild librw.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librw /m
+
+      - name: Build Ariane
+        shell: cmd
+        run: |
+          cd src\ariane
+          premake5 vs2022 --channel=master --update-repo=${{ github.repository }} || exit /b 1
+          cd build
+          msbuild librwgta.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librwgta;euryopa /m
+
+      - name: Upload ariane.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: ariane-exe
+          path: src/ariane/bin/win-amd64-d3d9/Release/ariane.exe
+          if-no-files-found: error
+
+  blender-addon:
+    name: Blender addon zip
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read addon version
+        id: version
+        run: |
+          ver=$(grep -m1 '^version' blender/INU_tools/blender_manifest.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Python syntax check
+        run: python -m compileall -q blender/INU_tools
+
+      - name: Cache Blender
+        id: cache-blender
+        uses: actions/cache@v4
+        with:
+          path: ~/blender
+          key: blender-${{ env.BLENDER_VERSION }}-linux-x64
+
+      - name: Download Blender
+        if: steps.cache-blender.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          mkdir -p ~/blender
+          series=$(echo "$BLENDER_VERSION" | cut -d. -f1,2)
+          curl -fsSL "https://download.blender.org/release/Blender${series}/blender-${BLENDER_VERSION}-linux-x64.tar.xz" -o /tmp/blender.tar.xz
+          tar -xf /tmp/blender.tar.xz -C ~/blender --strip-components=1
+
+      - name: Build + validate extension zip
+        run: |
+          set -e
+          find blender/INU_tools -name __pycache__ -type d -prune -exec rm -rf {} +
+          mkdir -p dist
+          "$HOME/blender/blender" --command extension build --source-dir blender/INU_tools --output-dir dist
+          zip=$(ls dist/inu_tools_gta_sa-*.zip | head -n1)
+          "$HOME/blender/blender" --command extension validate "$zip"
+          mv "$zip" "dist/INU_Tools-AidenFork-${{ steps.version.outputs.version }}.zip"
+
+      - name: Smoke test (register addon in Blender)
+        run: |
+          cat > /tmp/smoke.py <<'EOF'
+          import sys, bpy
+          sys.path.insert(0, "blender")
+          import INU_tools
+          INU_tools.register()
+          assert hasattr(bpy.types, "GTATOOLS_OT_ariane_import_full_map")
+          assert hasattr(bpy.context.scene.inu_settings, "ariane_fm_lod")
+          print("SMOKE OK")
+          EOF
+          "$HOME/blender/blender" -b --factory-startup --python /tmp/smoke.py 2>&1 | tee /tmp/smoke.log
+          grep -q "SMOKE OK" /tmp/smoke.log
+
+      - name: Build legacy add-on zip (Blender 2.83 - 4.1)
+        run: |
+          cd blender
+          zip -qr "../dist/INU_Tools-AidenFork-${{ steps.version.outputs.version }}-legacy.zip" INU_tools -x '*__pycache__*' '*.pyc'
+
+      - name: Upload addon zips
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-addon
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [ariane-windows, blender-addon]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect files
+        id: files
+        run: |
+          mkdir -p release
+          cp artifacts/ariane-exe/ariane.exe release/
+          cp artifacts/blender-addon/*.zip release/
+          (cd release && sha256sum * > SHA256SUMS.txt)
+          ls -la release
+          short=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "tag=v${{ needs.ariane-windows.outputs.version }}-master-aiden.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.files.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Aiden Fork build ${{ github.run_number }} (Ariane ${{ needs.ariane-windows.outputs.version }} / INU Tools ${{ needs.blender-addon.outputs.version }})
+          make_latest: true
+          body: |
+            Automatic build of commit `${{ steps.files.outputs.short }}`.
+
+            **Files**
+            - `ariane.exe` — Ariane (Aiden Fork). Drop it into your GTA folder (next to `gta_sa.exe` / `gta-vc.exe` / `gta3.exe`).
+            - `INU_Tools-AidenFork-${{ needs.blender-addon.outputs.version }}.zip` — Blender 4.2+: *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…*
+            - `INU_Tools-AidenFork-${{ needs.blender-addon.outputs.version }}-legacy.zip` — Blender 2.83–4.1: *Preferences → Add-ons → Install…*
+
+            **Aiden Fork features**
+            - Ariane: *Aiden Fork QOL* menu + panel — disable all view distance (whole map, no LOD), remove all LOD / LOD only / all LOD active, Export FULL MAP to Blender.
+            - Blender: *GTA Tools → Ariane tab → Whole Map* — Import WHOLE MAP with toggles for LOD, Night Lights, 2DFX lights, textures, collision, interiors.
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

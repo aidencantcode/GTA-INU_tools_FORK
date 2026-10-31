@@ -1,0 +1,71 @@
+schema_version = "1.0.0"
+
+# Unique extension ID — reverse-DNS-style. Must not change between versions.
+id = "inu_tools_gta_sa"
+version = "2.5.4"
+name = "INU Tools (GTA SA) - Aiden Fork"
+tagline = "Full-pipeline toolkit for GTA San Andreas modding"
+maintainer = "INU"
+
+# add-on / theme / asset-pack — INU is an addon
+type = "add-on"
+
+# URL shown on extension page
+website = "https://github.com/INU-ez/INU_Tools-GTA-Blender"
+
+# Tags from Blender's official extension taxonomy.
+# https://docs.blender.org/manual/en/latest/extensions/tags.html
+# Per reviewer feedback: only Import-Export + Game Engine.
+tags = [
+  "Import-Export",
+  "Game Engine",
+]
+
+# Minimum supported Blender version. INU uses Blender 4.2+ extension API.
+blender_version_min = "4.2.0"
+# Optional max — leave blank for forward compatibility (tested up to 5.2.3 LTS).
+# blender_version_max = ""
+
+# SPDX license expression — the EXTENSION's own license. Must be from the
+# platform's accepted list (OFL-1.1 is NOT accepted here). The bundled Inter
+# font keeps its own OFL-1.1 license in data/fonts/OFL.txt.
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+# Copyright lines (one per holder/year span).
+copyright = [
+  "2024-2026 INU",
+]
+
+# Permissions — declare any platform capability the addon uses,
+# with a one-line user-facing reason. Reviewers and end-users see these.
+[permissions]
+files = "Read and write GTA San Andreas model and map files"
+
+# Build packaging — files excluded from the published .zip.
+# Keeps the extension clean (no caches / VCS / dev artefacts).
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "*.pyc",
+  "*.pyo",
+  ".git/",
+  ".github/",
+  ".pytest_cache/",
+  "*.blend1",
+  "*.orig",
+  "*.tmp",
+  # The "GTA Geo" tab (procedural pavement / kerb on geometry nodes and
+  # buildings on top of the separate Auto-Building addon) is experimental
+  # and is NOT registered in this release — see the comment above the
+  # ui.geo_panels import in __init__.py. Its modules are kept in the repo
+  # but left out of the published zip so the extension ships no code it
+  # never runs. Re-registering the tab means removing these four lines too.
+  # Leading "/" anchors the pattern to the package root (same syntax as
+  # Blender's own "/.git/" default), so only these exact files are cut.
+  "/ops/geo_curb_ops.py",
+  "/ops/geo_building_ops.py",
+  "/ui/geo_panels.py",
+  "/data/autobuilding_ui.py",
+]

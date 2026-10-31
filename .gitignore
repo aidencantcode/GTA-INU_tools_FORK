@@ -1,0 +1,17 @@
+# Ariane build output
+ariane/bin/
+ariane/lib/
+ariane/build/obj/
+ariane/build/*.make
+ariane/build/Makefile
+ariane/build/*.sln
+ariane/build/*.vcxproj*
+*.obj
+*.pdb
+# Blender
+__pycache__/
+*.pyc
+*.blend1
+dist/
+inu_tools_gta_sa-*.zip
+INU_Tools-*.zip

@@ -1,0 +1,54 @@
+namespace Timecycle
+{
+	struct ColourSet
+	{
+		rw::RGBAf amb;
+		rw::RGBAf amb_obj;
+		rw::RGBAf amb_bl;
+		rw::RGBAf amb_obj_bl;
+		rw::RGBAf dir;
+		rw::RGBAf skyTop;
+		rw::RGBAf skyBottom;
+		rw::RGBAf sunCore;
+		rw::RGBAf sunCorona;
+		float sunSz;
+		float sprSz;
+		float sprBght;
+		float shdw;
+		float lightShd;
+		float poleShd;	// treeshd in III
+		float farClp;
+		float fogSt;
+		float lightOnGround;
+		rw::RGBAf lowCloud;
+		rw::RGBAf fluffyCloudTop;
+		rw::RGBAf fluffyCloudBottom;
+		rw::RGBAf water;
+		rw::RGBAf postfx1;	// also blur
+		rw::RGBAf postfx2;
+		float cloudAlpha;
+		float radiosityLimit;
+		float radiosityIntensity;
+		float waterFogAlpha;
+		float dirMult;
+		// neo
+		float lightMapIntensity;
+	};
+	extern ColourSet currentColours;
+	// Ambient the BUILDING pipeline adds on top of prelit colours (the small «Amb», or the
+	// blurred one on VC/LCS). Kept apart from the RW world ambient (pAmbient), which lights
+	// everything unlit with «Amb_Obj» like the game does. Set by SetLights() every frame.
+	extern rw::RGBAf buildingAmbient;
+	extern rw::RGBAf currentFogColour;
+	extern rw::RGBA belowHorizonColour;
+
+	void Initialize(void);
+	// live bridge: bounds-checked pointer into the raw (hour,weather) table so the
+	// Blender bridge can patch a single cell in memory (nil if out of range / unloaded).
+	ColourSet *GetColourSetPtr(int hour, int weather);
+	void InitNeoWorldTweak(void);
+	void AddBox(CBox box, int farClp, int extraCol, float extraStrength, float falloff, float lodDist);
+	void Update(void);
+	void SetLights(void);
+	void RenderBoxes(void);
+}
