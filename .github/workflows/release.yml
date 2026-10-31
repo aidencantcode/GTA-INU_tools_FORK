@@ -57,7 +57,9 @@ jobs:
         run: |
           Invoke-WebRequest -Uri "https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-windows.zip" -OutFile premake5.zip
           Expand-Archive premake5.zip -DestinationPath premake5
-          echo "${{ github.workspace }}\premake5" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # NOTE: librw ships an OLD premake5.exe in its root and cmd runs the copy in the
+          # current folder before PATH — so always call this one by its full path.
+          & "${{ github.workspace }}\premake5\premake5.exe" --version
 
       - name: Read Ariane version
         id: version
@@ -71,7 +73,7 @@ jobs:
         shell: cmd
         run: |
           cd librw
-          premake5 vs2022 || exit /b 1
+          "%GITHUB_WORKSPACE%\premake5\premake5.exe" vs2022 || exit /b 1
           cd build
           msbuild librw.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librw /m
 
@@ -79,7 +81,7 @@ jobs:
         shell: cmd
         run: |
           cd src\ariane
-          premake5 vs2022 --channel=master --update-repo=${{ github.repository }} || exit /b 1
+          "%GITHUB_WORKSPACE%\premake5\premake5.exe" vs2022 --channel=master --update-repo=${{ github.repository }} || exit /b 1
           cd build
           msbuild librwgta.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librwgta;euryopa /m
 
