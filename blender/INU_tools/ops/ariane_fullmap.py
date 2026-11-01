@@ -248,10 +248,74 @@ def _quat(meta):
                        -float(meta.get('qy', 0.0)), -float(meta.get('qz', 0.0))))
 
 
+def _world_matrix(o):
+    """World matrix from the parent chain WITHOUT a depsgraph update (the map
+    collection is excluded from the view layer while importing)."""
+    m = o.matrix_basis.copy()
+    while o.parent is not None:
+        m = o.parent.matrix_basis @ o.matrix_parent_inverse @ m
+        o = o.parent
+    return m
+
+
+def _texture_pass(new_objs, meta):
+    """Textures for a freshly imported model — each texture decoded ONCE per
+    import. Already-loaded images are wired straight into the new materials;
+    only the still-missing names are decoded from <txd>.txd (the exact file
+    Ariane named — no folder-wide coverage scan)."""
+    from .dff_import import _collect_dff_scope
+    scope_mats, _needed = _collect_dff_scope(new_objs)
+    imgs = _st['img_lower']
+    missing = set()
+    for m in scope_mats:
+        n = (m.get('dff_texture_name') or '').lower()
+        if not n:
+            continue
+        img = imgs.get(n)
+        if img is None:
+            missing.add(n)
+            continue
+        if m.node_tree is not None:
+            for node in m.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image is None:
+                    node.image = img
+    if not missing or not _st['flags'].get('auto_txd', True):
+        return
+    txd = (meta.get('txd') or '').strip()
+    if not txd:
+        return
+    key = txd.lower()
+    missing = {n for n in missing if (key, n) not in _st['tex_tried']}
+    if not missing:
+        return
+    path = os.path.join(_st['dir'], txd + '.txd')
+    if not os.path.isfile(path):
+        _st['tex_tried'].update((key, n) for n in missing)
+        return
+    from .txd_import import import_txd
+    try:
+        images = import_txd(filepath=path, name_filter=missing,
+                            material_scope=scope_mats, swap_rb=None) or []
+    except Exception as exc:                                # noqa: BLE001
+        print(f"[ariane fullmap] TXD {txd} failed: {exc}")
+        images = []
+    for img in images:
+        try:
+            imgs[img.name.lower()] = img
+        except Exception:                                   # noqa: BLE001
+            pass
+    # names this TXD doesn't have (parent txd / missing) — never retry them
+    _st['tex_tried'].update((key, n) for n in missing)
+
+
 def _import_template(meta):
-    """Import <model>.dff (+ its TXD / COL) once. Returns a template dict or None."""
-    from .dff_import import import_one_dff, _init_import_stats
-    ctx = bpy.context
+    """Import <model>.dff (+ its textures / COL) once. Returns a template dict or None.
+
+    Uses the bulk map-import path of import_dff: no per-model view_layer.update()
+    or select_all() (both cost O(scene) and made the import slow down more and
+    more as the map grew), a material cache shared across the whole map, and the
+    once-per-texture pass above instead of the generic auto-TXD picker."""
+    from .dff_import import import_dff
     model = meta['model']
     dff = os.path.join(_st['dir'], model + '.dff')
     if not os.path.isfile(dff):
@@ -260,29 +324,19 @@ def _import_template(meta):
         return None
 
     staging = _staging()
-    _activate(staging)
     fx_coll = bpy.data.collections.get(_FX_COLL)
     fx_before = set(fx_coll.objects) if fx_coll is not None else set()
 
-    settings = getattr(ctx.scene, 'inu_settings', None)
-    if settings is not None:
-        try:
-            settings.gtatools_txd_auto_import = bool(_st['flags'].get('auto_txd', True))
-        except Exception:                                   # noqa: BLE001
-            pass
     vanilla = bool(_st['flags'].get('vanilla', True))
+    t0 = time.perf_counter()
     try:
-        stats = _init_import_stats({})
-        txd_hint = (meta.get('txd') or '').strip() or None
-        for _ in import_one_dff(dff, ctx, stats, import_game=None,
-                                link_alpha=not vanilla, txd_hint=txd_hint,
-                                weld_sharpen=vanilla, skip_2dfx=not _st['want_2dfx']):
-            pass
-        if stats.get('errors'):
-            print(f"[ariane fullmap] {model}: {stats['errors']}")
+        import_dff(filepath=dff, context=bpy.context, skip_2dfx=not _st['want_2dfx'],
+                   bulk_mode=True, target_collection=staging,
+                   material_cache=_st['mat_cache'], weld_sharpen=vanilla)
     except Exception as exc:                                # noqa: BLE001
         print(f"[ariane fullmap] import error for {model}: {exc}")
         _st['errors'] += 1
+    _st['t_dff'] += time.perf_counter() - t0
 
     new_objs = list(staging.objects)
     for o in new_objs:
@@ -293,7 +347,6 @@ def _import_template(meta):
         fx_objs = [o for o in fx_coll.objects if o not in fx_before]
         for o in fx_objs:
             fx_coll.objects.unlink(o)
-        # don't leave an empty helper "2DFX" collection behind
         if len(fx_coll.objects) == 0 and len(fx_coll.children) == 0 and not fx_before:
             try:
                 bpy.data.collections.remove(fx_coll)
@@ -304,6 +357,10 @@ def _import_template(meta):
             bpy.data.objects.remove(o, do_unlink=True)
         _st['errors'] += 1
         return None
+
+    t1 = time.perf_counter()
+    _texture_pass(new_objs, meta)
+    _st['t_txd'] += time.perf_counter() - t1
 
     # one root per model so placement = a single transform
     roots = [o for o in new_objs if o.parent is None]
@@ -335,17 +392,16 @@ def _import_template(meta):
                 col_objs = import_col_from_models(
                     read_col_file(col_path), bulk_mode=True,
                     target_collection=staging, material_cache=_st['col_mats']) or []
-                ctx.view_layer.update()
                 vis = max((o for o in new_objs if o.type == 'MESH'),
                           key=lambda o: len(o.data.vertices), default=None)
-                mw = vis.matrix_world.copy() if vis is not None else None
+                mw = _world_matrix(vis) if vis is not None else None
                 for co in col_objs:
                     for c in list(co.users_collection):
                         c.objects.unlink(co)
                     if co.parent is None:
                         co.parent = root
                         if mw is not None:
-                            co.matrix_world = mw
+                            co.matrix_basis = mw      # root sits at identity here
             except Exception as exc:                        # noqa: BLE001
                 print(f"[ariane fullmap] COL skipped for {model}: {exc}")
                 col_objs = []
@@ -554,8 +610,23 @@ def _start(path) -> int:
         'prev_active': bpy.context.view_layer.active_layer_collection.collection,
         't0': time.monotonic(), 'phase': 'importing',
         'game': header.get('game', ''),
+        # perf caches
+        'mat_cache': {}, 'tex_tried': set(),
+        'img_lower': {img.name.lower(): img for img in bpy.data.images},
+        't_dff': 0.0, 't_txd': 0.0, 'last_redraw': 0.0, 'excluded': False,
     }
-    _root_coll()['gta_game'] = _st['game']
+    root = _root_coll()
+    root['gta_game'] = _st['game']
+    # Keep the map OUT of the depsgraph while importing: with the root collection
+    # excluded, adding objects doesn't make Blender re-evaluate / redraw the whole
+    # (growing) map every tick. Re-included once at the end.
+    lc = _find_layer_coll(bpy.context.view_layer.layer_collection, root)
+    if lc is not None and not lc.exclude:
+        lc.exclude = True
+        _st['excluded'] = True
+    _staging()
+    _activate(_staging())
+    _detect_game(keep)
     print(f"[ariane fullmap] {len(keep)} placements ({len(entries)} sent) from {d}")
     try:
         bpy.context.window_manager.progress_begin(0, 100)
@@ -566,10 +637,23 @@ def _start(path) -> int:
     return len(keep)
 
 
+def _detect_game(entries):
+    """Set the scene game from the first DFF once (import_one_dff did it per model)."""
+    try:
+        from ..core import game_versions as gv
+        for m in entries:
+            dff = os.path.join(_st['dir'], m['model'] + '.dff')
+            if os.path.isfile(dff):
+                gv.maybe_set_game_from_import(bpy.context.scene, gv.detect_game_from_dff(dff))
+                return
+    except Exception as exc:                                # noqa: BLE001
+        print(f"[ariane fullmap] game detect skipped: {exc}")
+
+
 def _driver():
     if _st is None:
         return None
-    deadline = time.monotonic() + 0.15
+    deadline = time.monotonic() + 0.5
     q = _st['queue']
     while _st['pos'] < len(q) and time.monotonic() < deadline:
         meta = q[_st['pos']]
@@ -587,18 +671,27 @@ def _driver():
             f"{len(_st['templates'])} models")
     except Exception:                                       # noqa: BLE001
         pass
-    _redraw()
+    now = time.monotonic()
+    if now - _st['last_redraw'] > 1.0:       # UI only — the map itself is excluded
+        _st['last_redraw'] = now
+        _redraw(ui_only=True)
     if _st['pos'] >= len(q):
         _finish()
         return None
-    return 0.001
+    return 0.0
 
 
-def _redraw():
+def _redraw(ui_only=False):
     try:
         for win in bpy.context.window_manager.windows:
             for area in win.screen.areas:
-                if area.type == 'VIEW_3D':
+                if area.type != 'VIEW_3D':
+                    continue
+                if ui_only:
+                    for region in area.regions:
+                        if region.type in ('UI', 'HEADER'):
+                            region.tag_redraw()
+                else:
                     area.tag_redraw()
     except Exception:                                       # noqa: BLE001
         pass
@@ -627,6 +720,12 @@ def _finish(cancelled=False):
         _activate(st['prev_active'])
     except Exception:                                       # noqa: BLE001
         pass
+
+    if st.get('excluded'):
+        lc = _find_layer_coll(bpy.context.view_layer.layer_collection, st['colls'].get('root'))
+        if lc is not None:
+            lc.exclude = False
+    print(f"[ariane fullmap] time in DFF build {st['t_dff']:.0f}s, textures {st['t_txd']:.0f}s")
 
     if st['hide_lod']:
         lod = st['colls'].get('lod')
